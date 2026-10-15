@@ -1,0 +1,36 @@
+{
+  "name": "@27colab/sms-consent",
+  "version": "0.1.0",
+  "description": "Reference implementation of SMS consent handling: keyword classifier, consent state machine, send guard, storage adapters, Twilio webhook helper. Not legal advice.",
+  "private": false,
+  "type": "module",
+  "license": "MIT",
+  "author": "Jesus Vasquez (27 Colab LLC)",
+  "keywords": ["sms", "consent", "opt-out", "stop", "ctia", "twilio", "tcpa"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public", "provenance": true },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "better-sqlite3": "^11.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
