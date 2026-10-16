@@ -1,124 +1,100 @@
 # @27colab/sms-consent
 
-A small, dependency-free TypeScript **reference implementation** of SMS consent handling:
+A dependency-free TypeScript reference for SMS consent handling: classify STOP/START/HELP, track consent per number, and gate every send behind a guard.
 
-- **Keyword classifier**: STOP / STOPALL / UNSUBSCRIBE / CANCEL / END / QUIT, START / UNSTOP, HELP, YES. Tolerant of case, accents, punctuation, emoji, zero-width characters and whitespace. English and Spanish built in, extensible.
-- **Consent state machine** per `(accountId, phone)`: `none → pending → opted_in → opted_out`, with idempotent STOP and re-opt-in via START.
-- **`guardSend()`**: a pure allow/deny decision with a reason: consent required, opt-outs honoured, opt-out footer required, quiet hours in the recipient's time zone.
-- **`sendGuarded()`**: guard + provider call that never reports a "phantom send".
-- **`ConsentStore`** interface with in-memory and SQLite adapters (SQLite via any handle shaped like `better-sqlite3` / `node:sqlite`; no dependency on either).
-- **Twilio webhook helper** (optional, no Twilio SDK): inbound STOP/START/HELP handling, TwiML response, `X-Twilio-Signature` verification.
+[![CI](https://github.com/27colab/sms-consent/actions/workflows/ci.yml/badge.svg)](https://github.com/27colab/sms-consent/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@27colab/sms-consent)](https://www.npmjs.com/package/@27colab/sms-consent)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![types: TypeScript](https://img.shields.io/badge/types-TypeScript-3178c6.svg)](https://www.typescriptlang.org/)
 
-> **Important: reference implementation, not legal advice, no compliance guarantees.**
-> This library is a starting point that encodes common conventions. Whether your messaging program meets the TCPA, CTIA guidelines, carrier/10DLC registration rules or any other law or policy depends on your content, your consent collection and your jurisdiction. It makes no claim that using it makes you compliant. Review with qualified counsel. Provided "as is" under the MIT license.
+> **Reference implementation, not legal advice, no compliance guarantee.** It encodes common conventions as a starting point. Whether your program meets the TCPA, CTIA guidelines, carrier or 10DLC rules or any other law depends on your content, your consent collection and your jurisdiction. Review with qualified counsel.
 
-Background reading:
+## Why
 
-- [CTIA Messaging Principles and Best Practices](https://www.ctia.org/the-wireless-industry/industry-commitments/messaging-interoperability-sms-mms)
-- [Twilio: Advanced Opt-Out](https://www.twilio.com/docs/messaging/tutorials/advanced-opt-out)
-- [Twilio: Webhooks security (request signatures)](https://www.twilio.com/docs/usage/webhooks/webhooks-security)
-- [Twilio: Messaging policy & compliance](https://www.twilio.com/en-us/legal/messaging-policy)
+- **One decision point.** `guardSend()` returns allow/deny with a reason: no consent, opted out, missing opt-out footer, or quiet hours in the recipient's time zone (fails closed without one).
+- **No phantom sends.** `sendGuarded()` reports `sent: true` only if the guard allowed it and your provider call resolved, so you never tell a user or an LLM "I texted you" when you didn't.
+- **Messy replies handled.** English and Spanish keywords, tolerant of case, accents, punctuation, emoji and zero-width characters; STOP wins ties. 180 offline tests.
 
 ## Install
 
-```sh
+```bash
 npm install @27colab/sms-consent
 ```
 
-Node 20+. ESM only.
+Node 20+, ESM, zero runtime dependencies, TypeScript types included.
 
-## Usage
+## Quickstart
+
+Runs as-is with the in-memory store and a `console.log` standing in for your SMS provider.
 
 ```ts
-import {
-  MemoryConsentStore, applyConsentEvent, sendGuarded, handleInbound, defaultReplies,
-} from '@27colab/sms-consent';
+import { MemoryConsentStore, applyConsentEvent, handleInbound, defaultReplies, sendGuarded } from '@27colab/sms-consent';
 
-const store = new MemoryConsentStore(); // or new SqliteConsentStore(db)
+const store = new MemoryConsentStore();                     // or SqliteConsentStore(db)
+const [accountId, phone] = ['acct-1', '+15550001111'];
+const send = async (to: string, body: string) => console.log(`-> ${to}: ${body}`);  // your SMS provider here
+const base = { store, accountId, phone, timeZone: 'America/New_York', now: new Date('2026-06-02T15:00:00Z'), send };
 
-// 1. Ask for consent (double opt-in).
-await applyConsentEvent(store, 'acct-1', '+15550001111', { type: 'request_opt_in' });
-await sendGuarded({
-  store, accountId: 'acct-1', phone: '+15550001111',
-  kind: 'opt_in_request', timeZone: 'America/New_York',
-  body: 'Acme: Reply YES to get texts. Msg & data rates may apply. Reply STOP to opt out.',
-  send: (to, body) => myProvider.send(to, body),
-});
+await applyConsentEvent(store, accountId, phone, { type: 'request_opt_in' });
+await sendGuarded({ ...base, kind: 'opt_in_request',
+  body: 'Acme: Reply YES to get texts. Msg & data rates may apply. Reply STOP to opt out.' });
 
-// 2. Handle inbound replies.
 const replies = defaultReplies('Acme', 'help@example.test');
-const { reply } = await handleInbound({ store, accountId: 'acct-1', from: '+15550001111', body: 'yes', replies });
-// reply (if any) should be sent with kind: 'reply'
+await handleInbound({ store, accountId, from: phone, body: 'yes', replies });   // pending -> opted_in
+console.log(await sendGuarded({ ...base, body: 'Your order shipped. Reply STOP to opt out.' }));
 
-// 3. Send, safely.
-const result = await sendGuarded({
-  store, accountId: 'acct-1', phone: '+15550001111', timeZone: 'America/New_York',
-  body: 'Your order shipped. Reply STOP to opt out.',
-  send: (to, body) => myProvider.send(to, body),
-});
-if (!result.sent) console.log(result.reason, result.retryAt); // e.g. 'quiet_hours'
+await handleInbound({ store, accountId, from: phone, body: 'STOP', replies });  // opted_in -> opted_out
+const blocked = await sendGuarded({ ...base, body: 'Sale today! Reply STOP to opt out.' });
+console.log(blocked.sent, !blocked.sent && blocked.reason);                     // false 'opted_out'
 ```
 
-### Guard decisions
+Output:
 
-`guardSend(record, body, options)` is pure and returns `{ allow: true }` or `{ allow: false, reason, detail, retryAt? }`.
+```
+-> +15550001111: Acme: Reply YES to get texts. Msg & data rates may apply. Reply STOP to opt out.
+-> +15550001111: Your order shipped. Reply STOP to opt out.
+{ sent: true }
+false opted_out
+```
 
-| reason | meaning |
+## Bring your own keys
+
+None required. You pass a plain `send(to, body)` function, so any provider works. The optional Twilio helper (`handleTwilioInbound`) uses your Twilio auth token only to verify `X-Twilio-Signature`; there is no Twilio SDK dependency. Pass `verify` when you run it for real.
+
+## API
+
+| Export | Purpose |
 |---|---|
-| `empty_body` | nothing to send |
-| `opted_out` | recipient sent STOP; only START re-enables |
-| `no_consent` / `pending_confirmation` | no confirmed opt-in on record |
-| `missing_opt_out_footer` | body does not tell the recipient how to opt out (use `ensureOptOutFooter`) |
-| `timezone_required` | quiet hours are on but no recipient time zone was given (fails closed) |
-| `quiet_hours` | inside the quiet window (default 21:00–08:00 recipient-local); `retryAt` is the next allowed minute |
-| `send_failed` | (`sendGuarded` only) the provider call threw |
+| `classifyInbound(body, opts?)` | `STOP \| START \| HELP \| YES \| OTHER`; extend keyword lists per language. |
+| `applyConsentEvent(store, accountId, phone, event)` | State machine `none → pending → opted_in → opted_out`; idempotent STOP, START re-opts in. |
+| `guardSend(record, body, opts)` | Pure allow/deny with `reason` and `retryAt`. |
+| `sendGuarded({ store, send, … })` | Guard plus provider call; never a phantom send. |
+| `handleInbound(…)` / `defaultReplies(brand, help?)` | Classify an inbound message, update consent, return the reply to send. |
+| `handleTwilioInbound(…)` | Webhook helper: TwiML response and signature check. |
+| `MemoryConsentStore`, `SqliteConsentStore` | Stores; SQLite takes any `better-sqlite3`-shaped handle. Implement `ConsentStore` for anything else. |
 
-Send kinds: `message` (needs `opted_in`), `opt_in_request` (allowed for `none`/`pending`, never for `opted_out`), `reply` (direct response to an inbound message, such as a STOP confirmation or HELP text; always allowed, so use it only for that).
+Full reference, guard reasons and keyword rules: **[docs.27colab.com/packages/sms-consent](https://docs.27colab.com/packages/sms-consent/)**
 
-### No phantom sends
+## Limits
 
-`sendGuarded` returns `sent: true` only if the guard allowed it **and** the provider call resolved. A denied send never reaches the provider; a failed provider call is reported as `sent: false`. Don't tell a user or an LLM "I texted you" unless `sent` is `true`.
+- `ok` and `sure` are deliberately not treated as YES.
+- Twilio Advanced Opt-Out may already intercept STOP/START/HELP; this keeps your own ledger in sync with what recipients texted.
+- Consent collection, message content and registration are yours to get right.
 
-### Keyword behaviour (and limits)
+## Not for you if…
 
-- STOP wins ties. A message of up to three words containing a stop word ("please stop", "yes stop") is a STOP. Longer free text is only treated as STOP when it *starts* with a stop word. Free text such as "I can never stop thinking about it" is `OTHER`.
-- `ok` and `sure` are intentionally **not** YES, because they are too ambiguous to treat as consent.
-- Add languages via `classifyInbound(body, { stop: [...], start: [...], help: [...], yes: [...] })`.
+- You want assurance that a messaging program is compliant. Nothing here can give you that.
+- You need a provider SDK or delivery tracking; the package only decides whether to send and records consent.
+- You need consent handling for channels other than SMS.
 
-### SQLite
+## Develop
 
-```ts
-import Database from 'better-sqlite3';
-import { SqliteConsentStore } from '@27colab/sms-consent';
-const store = new SqliteConsentStore(new Database('consent.db'));
+```bash
+npm ci && npm test && npm run typecheck
 ```
 
-Creates `sms_consent` plus an append-only `sms_consent_events` log. Rows are never deleted. Implement `ConsentStore` (`get`/`put`) for Postgres or anything else.
+MIT, see [LICENSE](LICENSE).
 
-### Twilio
+---
 
-```ts
-import { handleTwilioInbound } from '@27colab/sms-consent';
-
-const res = await handleTwilioInbound({
-  store, accountId: 'acct-1', replies,
-  body: rawFormBody,
-  verify: { authToken: process.env.TWILIO_AUTH_TOKEN!, url: publicWebhookUrl, signature: req.headers['x-twilio-signature'] },
-});
-// respond with res.status, res.contentType, res.body
-```
-
-Twilio's Advanced Opt-Out may already intercept STOP/START/HELP for your Messaging Service; this helper keeps *your* ledger in sync with what recipients texted. Always pass `verify` in production.
-
-## Development
-
-```sh
-npm install
-npm test
-npm run coverage
-npm run build
-```
-
-## License
-
-MIT © 2026 27 Colab LLC
+Built by [Jesus Vasquez](https://github.com/vasquezjesus2710) · [27 Colab](https://27colab.com)
